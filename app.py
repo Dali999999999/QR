@@ -119,7 +119,7 @@ def upload_image():
                 # 5. Tentative de retrouver le node via m.find() après un délai, puis export
                 try:
                     # *** AJOUT D'UN DÉLAI POUR LA SYNCHRONISATION ***
-                    sleep_duration = 3 # Augmenté à 3 secondes
+                    sleep_duration = 10 # Augmenté à 3 secondes
                     logger.info(f"Ajout d'un délai de {sleep_duration} seconde(s) avant la recherche et l'export...")
                     time.sleep(sleep_duration)
 
