@@ -3,8 +3,8 @@ import logging
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from mega import Mega
-import uuid # Pour générer des noms de fichiers temporaires uniques
-# Pas besoin de 'time' pour cette approche
+from mega.errors import ValidationError # Importer si besoin de catcher spécifiquement
+import uuid
 
 # Configuration du logging améliorée
 logging.basicConfig(
@@ -113,32 +113,34 @@ def upload_image():
                  logger.error(f"Erreur lors de l'accès à la structure imbriquée retournée par m.upload(): {e_access}", exc_info=True)
                  logger.error(f"Structure complète reçue: {uploaded_file_node_response}")
 
-            # ---> Vérification et Export en passant le tuple (handle, node_data) via l'argument 'node' <---
+            # ---> Vérification et Construction Manuelle du Lien <---
             if file_handle and node_dict:
                 logger.info(f"Handle du fichier trouvé: {file_handle}. Données du node extraites.")
 
-                # 5. Obtenir le lien public via m.export(node=...)
+                # 5. Construire le lien public manuellement
                 try:
-                    # *** Construction du tuple attendu par export en interne ***
-                    node_tuple_for_export = (file_handle, node_dict)
-                    logger.info(f"Construction du tuple (handle, node_data) pour l'argument 'node' de m.export...")
+                    logger.info("Tentative de construction manuelle du lien d'exportation...")
 
-                    # *** Appel de m.export en utilisant l'argument nommé 'node' ***
-                    public_link = m.export(node=node_tuple_for_export)
+                    # Extrait la clé complète (ex: 'user:key')
+                    full_key = node_dict.get('k')
+                    if not full_key or ':' not in full_key:
+                        logger.error(f"La clé ('k') est manquante ou a un format inattendu dans node_dict: {node_dict}")
+                        raise ValueError("Impossible d'extraire la clé du fichier depuis la réponse d'upload.")
 
-                    if public_link:
-                        logger.info(f"Lien public Mega (via export avec node=tuple) généré avec succès.")
-                        # 6. Retourner le lien
-                        return jsonify({"url": public_link}), 200
-                    else:
-                        # Si export retourne None même en passant le node tuple
-                        logger.error(f"m.export(node=tuple) a retourné None pour le handle {file_handle}.")
-                        return jsonify({"error": "Erreur interne: Impossible de générer le lien public (export node tuple a échoué)."}), 500
+                    # Extrait la partie après les ':'
+                    file_key = full_key.split(':', 1)[1]
 
-                except Exception as export_error:
-                    # Gère les erreurs spécifiques à l'exportation
-                    logger.error(f"Erreur lors de l'appel à m.export(node=tuple) pour le handle {file_handle}: {export_error}", exc_info=True)
-                    error_message = f"Erreur interne lors de la création du lien public ({type(export_error).__name__}). Voir les logs serveur."
+                    # Construit l'URL
+                    public_link = f"https://mega.nz/file/{file_handle}#{file_key}"
+
+                    logger.info(f"Lien public Mega (construit manuellement) généré avec succès.")
+                    # 6. Retourner le lien
+                    return jsonify({"url": public_link}), 200
+
+                except Exception as link_build_error:
+                    # Gère les erreurs pendant la construction du lien
+                    logger.error(f"Erreur lors de la construction manuelle du lien pour le handle {file_handle}: {link_build_error}", exc_info=True)
+                    error_message = f"Erreur interne lors de la création du lien public ({type(link_build_error).__name__}). Voir les logs serveur."
                     return jsonify({"error": error_message}), 500
 
             else:
