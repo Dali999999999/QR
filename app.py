@@ -5,133 +5,160 @@ from werkzeug.utils import secure_filename
 from mega import Mega
 import uuid # Pour générer des noms de fichiers temporaires uniques
 
-# Configuration du logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configuration du logging améliorée (pourrait être utile sur Render)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler() # Affiche les logs dans la sortie standard (visible sur Render)
+    ]
+)
+# Obtenir un logger spécifique pour notre app (bonne pratique)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# Récupérer les identifiants Mega depuis les variables d'environnement
-# TU DOIS CONFIGURER CES VARIABLES SUR RENDER
+# --- Configuration et Constantes ---
 MEGA_EMAIL = os.environ.get('MEGA_EMAIL')
 MEGA_PASSWORD = os.environ.get('MEGA_PASSWORD')
+UPLOAD_FOLDER = '/tmp' # Dossier temporaire standard sur les systèmes Linux (comme Render)
 
-# Vérification initiale des identifiants
+# --- Vérifications Initiales ---
 if not MEGA_EMAIL or not MEGA_PASSWORD:
-    logging.error("ERREUR CRITIQUE: Les variables d'environnement MEGA_EMAIL et MEGA_PASSWORD doivent être définies.")
-    # Dans un cas réel, on pourrait vouloir arrêter l'application ici ou gérer différemment
-    # Pour l'instant, on log l'erreur mais on continue pour que l'app puisse démarrer (et échouer plus tard)
+    logger.critical("ERREUR CRITIQUE: Les variables d'environnement MEGA_EMAIL et MEGA_PASSWORD doivent être définies.")
+    # On pourrait vouloir empêcher Flask de démarrer ici, mais pour l'instant on log
 
-# Dossier temporaire pour stocker les fichiers avant l'upload sur Mega
-# Render fournit un système de fichiers temporaire
-UPLOAD_FOLDER = '/tmp' # Utilisation d'un dossier temporaire standard
+# Création du dossier temporaire si nécessaire
 if not os.path.exists(UPLOAD_FOLDER):
      try:
          os.makedirs(UPLOAD_FOLDER)
-         logging.info(f"Dossier temporaire créé: {UPLOAD_FOLDER}")
+         logger.info(f"Dossier temporaire créé: {UPLOAD_FOLDER}")
      except OSError as e:
-         logging.error(f"Impossible de créer le dossier temporaire {UPLOAD_FOLDER}: {e}")
+         logger.error(f"Impossible de créer le dossier temporaire {UPLOAD_FOLDER}: {e}")
          # Gérer l'erreur si nécessaire, par exemple en arrêtant l'application
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# Fonction pour initialiser et logger le client Mega
+# --- Fonctions Utilitaires ---
 def get_mega_instance():
     """Initialise et retourne une instance Mega connectée."""
+    if not MEGA_EMAIL or not MEGA_PASSWORD:
+        logger.error("Tentative de connexion à Mega échouée : Identifiants non configurés.")
+        return None
     try:
-        logging.info(f"Tentative de connexion à Mega avec l'email: {MEGA_EMAIL[:4]}...") # Ne pas logger l'email complet
+        # N'affiche que les 4 premiers caractères de l'email dans les logs
+        logger.info(f"Tentative de connexion à Mega avec l'email : {MEGA_EMAIL[:4]}...")
         mega = Mega()
         m = mega.login(MEGA_EMAIL, MEGA_PASSWORD)
-        logging.info("Connexion à Mega réussie.")
+        logger.info("Connexion à Mega réussie.")
         return m
     except Exception as e:
-        logging.error(f"Échec de la connexion à Mega: {e}")
+        logger.error(f"Échec de la connexion à Mega: {e}", exc_info=True) # exc_info=True pour la trace d'erreur
         return None
 
-# Route pour vérifier si le backend fonctionne
+# --- Routes Flask ---
 @app.route('/')
 def index():
+    """Route de base pour vérifier si le service est opérationnel."""
     return jsonify({"message": "Le backend de génération de QR Code Image est opérationnel!"})
 
-# Route pour l'upload d'image
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    if not MEGA_EMAIL or not MEGA_PASSWORD:
-         logging.error("Tentative d'upload échouée car les identifiants Mega ne sont pas configurés.")
-         return jsonify({"error": "Configuration serveur incomplète (identifiants Mega manquants)."}), 500
+    """Route pour recevoir une image, l'uploader sur Mega et retourner le lien."""
+    logger.info("Requête reçue sur /upload")
 
+    # 1. Vérification de la requête
     if 'file' not in request.files:
-        logging.warning("Aucun fichier trouvé dans la requête.")
-        return jsonify({"error": "Aucun fichier fourni"}), 400
+        logger.warning("Aucun fichier trouvé dans la requête (clé 'file' manquante).")
+        return jsonify({"error": "Aucun fichier fourni (champ 'file' manquant)"}), 400
 
     file = request.files['file']
 
     if file.filename == '':
-        logging.warning("Nom de fichier vide reçu.")
+        logger.warning("Nom de fichier vide reçu.")
         return jsonify({"error": "Nom de fichier vide"}), 400
 
     if file:
-        # Utiliser secure_filename pour éviter les problèmes de sécurité avec les noms de fichiers
+        # 2. Sauvegarde temporaire sécurisée
         original_filename = secure_filename(file.filename)
-        # Générer un nom de fichier unique pour éviter les collisions dans /tmp
+        # Génère un nom de fichier unique pour éviter les conflits dans /tmp
         temp_filename = f"{uuid.uuid4()}_{original_filename}"
         temp_filepath = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
 
-        logging.info(f"Réception du fichier: {original_filename}. Sauvegarde temporaire sous: {temp_filepath}")
+        logger.info(f"Réception du fichier: '{original_filename}'. Sauvegarde temporaire sous: '{temp_filepath}'")
 
         try:
-            # 1. Sauvegarder le fichier temporairement sur le serveur Render
             file.save(temp_filepath)
-            logging.info(f"Fichier sauvegardé temporairement: {temp_filepath}")
+            logger.info(f"Fichier sauvegardé temporairement: '{temp_filepath}'")
 
-            # 2. Se connecter à Mega
+            # 3. Connexion à Mega
             m = get_mega_instance()
             if m is None:
-                 # L'erreur est déjà loggée dans get_mega_instance
-                 # Supprimer le fichier temporaire avant de retourner l'erreur
-                 if os.path.exists(temp_filepath):
-                     os.remove(temp_filepath)
-                     logging.info(f"Fichier temporaire supprimé après échec de connexion: {temp_filepath}")
-                 return jsonify({"error": "Échec de la connexion au service de stockage"}), 503 # Service Unavailable
+                 logger.error("Échec de l'obtention de l'instance Mega pour l'upload.")
+                 # Le fichier temporaire sera nettoyé dans le 'finally'
+                 return jsonify({"error": "Échec de la connexion au service de stockage"}), 503
 
-            # 3. Téléverser le fichier sur Mega
-            logging.info(f"Téléversement du fichier '{temp_filename}' sur Mega...")
+            # 4. Téléversement sur Mega
+            logger.info(f"Téléversement du fichier '{temp_filename}' ({os.path.getsize(temp_filepath)} bytes) sur Mega...")
             uploaded_file_node = m.upload(temp_filepath)
-            logging.info(f"Fichier '{temp_filename}' téléversé sur Mega.")
+            logger.info(f"Fichier '{temp_filename}' téléversé sur Mega.")
 
-            # 4. Obtenir le lien public du fichier téléversé
-            # Note: m.export() donne un lien qui inclut la clé de déchiffrement
-            # Si vous préférez, vous pouvez chercher le fichier et utiliser m.get_link() pour un lien sans clé
-            # mais m.export est généralement ce qu'on veut pour un partage public simple.
-            public_link = m.export(uploaded_file_node['h']) # 'h' est généralement l'handle du fichier
-            logging.info(f"Lien public Mega généré: {public_link}")
+            # ---> POINT CRUCIAL : Inspection et Gestion du Handle <---
+            logger.info(f"Structure retournée par m.upload: {uploaded_file_node}") # Log pour inspection !
 
-            # 5. Retourner le lien à l'application Flutter
-            return jsonify({"url": public_link})
+            # Utilise .get() pour accéder à la clé 'h' de manière sécurisée
+            file_handle = uploaded_file_node.get('h')
+
+            if file_handle:
+                logger.info(f"Handle du fichier trouvé (clé 'h'): {file_handle}")
+
+                # 5. Obtenir le lien public
+                try:
+                    public_link = m.export(file_handle)
+                    logger.info(f"Lien public Mega généré avec succès.")
+                    # 6. Retourner le lien
+                    return jsonify({"url": public_link}), 200 # Code 200 explicite pour succès
+
+                except Exception as export_error:
+                    # Erreur spécifique lors de la création du lien public
+                    logger.error(f"Erreur lors de l'exportation du lien Mega pour le handle {file_handle}: {export_error}", exc_info=True)
+                    return jsonify({"error": f"Erreur interne lors de la création du lien public: {export_error}"}), 500
+
+            else:
+                # Si la clé 'h' n'est pas trouvée dans la réponse de m.upload()
+                logger.error(f"La clé 'h' (handle) est manquante dans la réponse de m.upload()! Réponse complète: {uploaded_file_node}")
+                return jsonify({"error": "Erreur interne: Impossible de récupérer l'identifiant du fichier après upload."}), 500
+            # ---> FIN DU POINT CRUCIAL <---
 
         except Exception as e:
-            logging.error(f"Erreur lors du traitement du fichier {original_filename}: {e}", exc_info=True) # exc_info=True pour la stack trace
-            return jsonify({"error": f"Erreur interne lors du traitement du fichier: {e}"}), 500
+            # Capture toute autre exception pendant le processus
+            logger.error(f"Erreur globale lors du traitement du fichier '{original_filename}': {e}", exc_info=True)
+            # Retourne une erreur générique 500 mais l'erreur spécifique est logguée sur le serveur
+            return jsonify({"error": "Erreur interne du serveur lors du traitement du fichier."}), 500
 
         finally:
-            # 6. Nettoyer : Supprimer le fichier temporaire DANS TOUS LES CAS (succès ou échec)
+            # 7. Nettoyage : Supprimer le fichier temporaire DANS TOUS LES CAS
             if os.path.exists(temp_filepath):
                 try:
                     os.remove(temp_filepath)
-                    logging.info(f"Fichier temporaire supprimé: {temp_filepath}")
-                except OSError as e:
-                    logging.error(f"Erreur lors de la suppression du fichier temporaire {temp_filepath}: {e}")
+                    logger.info(f"Fichier temporaire supprimé: '{temp_filepath}'")
+                except OSError as e_remove:
+                    logger.error(f"Erreur lors de la suppression du fichier temporaire '{temp_filepath}': {e_remove}")
     else:
-        # Ce cas ne devrait pas arriver si 'file' in request.files est passé, mais par sécurité
-        logging.warning("Aucun fichier valide reçu bien que 'file' soit dans request.files.")
-        return jsonify({"error": "Fichier invalide ou non reçu"}), 400
+        # Ce cas ne devrait pas arriver si 'file' in request.files est vrai, mais par sécurité
+        logger.warning("Logique inattendue : 'file' est évalué comme False après vérifications initiales.")
+        return jsonify({"error": "Fichier invalide ou non traité"}), 400
 
-# Point d'entrée pour Gunicorn (utilisé par Render)
-# Pas besoin de app.run() ici car Gunicorn s'en charge.
-# Si tu veux tester localement, tu peux décommenter les lignes suivantes :
+# --- Démarrage (pour Gunicorn sur Render) ---
+# Pas besoin de app.run() ici, Gunicorn s'en charge via le Procfile.
+
+# --- Bloc pour test local (Optionnel) ---
 # if __name__ == '__main__':
+#    logger.info("Démarrage du serveur Flask pour test local.")
 #    # ATTENTION : Ne pas utiliser debug=True en production !
-#    # Pour tester localement, tu devras définir les variables d'environnement
-#    # export MEGA_EMAIL='ton_email@example.com'
-#    # export MEGA_PASSWORD='ton_mot_de_passe'
+#    # Assurez-vous que les variables d'environnement MEGA_EMAIL et MEGA_PASSWORD sont définies
+#    # dans votre terminal avant de lancer :
+#    # export MEGA_EMAIL='votre_email@mega.com'
+#    # export MEGA_PASSWORD='votremotdepasse'
 #    # python app.py
 #    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False)
