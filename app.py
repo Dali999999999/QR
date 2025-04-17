@@ -93,47 +93,46 @@ def upload_image():
 
             # 4. Téléversement sur Mega
             logger.info(f"Téléversement du fichier '{temp_filename}' ({os.path.getsize(temp_filepath)} bytes) sur Mega...")
-            uploaded_file_node = m.upload(temp_filepath)
+            uploaded_file_node_response = m.upload(temp_filepath) # Renommé pour clarté
             logger.info(f"Fichier '{temp_filename}' téléversé sur Mega.")
-            logger.info(f"Structure retournée par m.upload: {uploaded_file_node}") # Gardons ce log utile
+            logger.info(f"Structure retournée par m.upload: {uploaded_file_node_response}")
 
-            # ---> CORRECTION : Accès au handle 'h' imbriqué <---
-            file_handle = None # Initialisation
+            # ---> Accès au handle 'h' et au dictionnaire du node <---
+            file_handle = None
+            node_dict = None # Pour stocker le dictionnaire {'h': ..., 't': ...}
             try:
-                # Vérifie si 'f' existe, est une liste non vide,
-                # et si le premier élément est un dictionnaire contenant 'h'
-                f_list = uploaded_file_node.get('f')
+                f_list = uploaded_file_node_response.get('f')
                 if isinstance(f_list, list) and f_list:
                     first_element = f_list[0]
                     if isinstance(first_element, dict):
-                        file_handle = first_element.get('h') # Accède à 'h' dans le dict imbriqué
+                        node_dict = first_element # Stocke le dictionnaire complet
+                        file_handle = node_dict.get('h') # Extrait le handle depuis le dict
 
             except (IndexError, TypeError, AttributeError) as e_access:
-                # Gère les erreurs potentielles lors de l'accès à la structure imbriquée
                  logger.error(f"Erreur lors de l'accès à la structure imbriquée retournée par m.upload(): {e_access}", exc_info=True)
-                 logger.error(f"Structure complète reçue: {uploaded_file_node}")
-                 file_handle = None # Assure que file_handle est None en cas d'erreur d'accès
+                 logger.error(f"Structure complète reçue: {uploaded_file_node_response}")
+                 # Assure que file_handle et node_dict restent None
 
-            # ---> FIN DE LA CORRECTION <---
+            # ---> Vérification et Export <---
+            if file_handle and node_dict: # Vérifie qu'on a bien les deux
+                logger.info(f"Handle du fichier trouvé: {file_handle}. Données du node extraites.")
 
-            if file_handle:
-                logger.info(f"Handle du fichier trouvé (clé 'h' imbriquée): {file_handle}")
-
-                # 5. Obtenir le lien public
+                # 5. Obtenir le lien public en passant le dictionnaire du node
                 try:
-                    public_link = m.export(file_handle)
+                    logger.info(f"Passage des données du node à m.export: {node_dict}")
+                    public_link = m.export(node_dict) # *** LIGNE MODIFIÉE ***
                     logger.info(f"Lien public Mega généré avec succès.")
                     # 6. Retourner le lien
                     return jsonify({"url": public_link}), 200
 
                 except Exception as export_error:
-                    logger.error(f"Erreur lors de l'exportation du lien Mega pour le handle {file_handle}: {export_error}", exc_info=True)
+                    logger.error(f"Erreur lors de l'exportation du lien Mega pour le node {node_dict}: {export_error}", exc_info=True)
                     return jsonify({"error": f"Erreur interne lors de la création du lien public: {export_error}"}), 500
 
             else:
-                # Si file_handle est toujours None après la tentative d'accès imbriqué
-                logger.error(f"Le handle ('h') n'a pas pu être extrait de la structure retournée par m.upload(). Structure: {uploaded_file_node}")
-                return jsonify({"error": "Erreur interne: Impossible d'extraire l'identifiant du fichier après upload (structure inattendue)."}), 500
+                # Si file_handle ou node_dict n'a pas pu être extrait
+                logger.error(f"Le handle ('h') ou les données du node n'ont pas pu être extraits de la structure retournée par m.upload(). Structure: {uploaded_file_node_response}")
+                return jsonify({"error": "Erreur interne: Impossible d'extraire les informations du fichier après upload (structure inattendue)."}), 500
 
         except Exception as e:
             logger.error(f"Erreur globale lors du traitement du fichier '{original_filename}': {e}", exc_info=True)
@@ -153,7 +152,3 @@ def upload_image():
 
 # --- Démarrage (pour Gunicorn sur Render) ---
 # (Bloc de test local inchangé et commenté)
-# if __name__ == '__main__':
-#     logger.info("Démarrage du serveur Flask pour test local.")
-#     # ... (assurer que les variables d'env sont définies) ...
-#     # app.run(...)
