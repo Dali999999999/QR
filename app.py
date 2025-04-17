@@ -4,7 +4,7 @@ from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from mega import Mega
 import uuid # Pour générer des noms de fichiers temporaires uniques
-import time # <-- Import nécessaire pour le délai
+# Pas besoin de 'time' pour cette approche
 
 # Configuration du logging améliorée
 logging.basicConfig(
@@ -98,53 +98,53 @@ def upload_image():
             logger.info(f"Fichier '{temp_filename}' téléversé sur Mega.")
             logger.info(f"Structure retournée par m.upload: {uploaded_file_node_response}")
 
-            # ---> Accès au handle 'h' <---
+            # ---> Accès au handle 'h' et au dictionnaire du node <---
             file_handle = None
+            node_dict = None
             try:
                 f_list = uploaded_file_node_response.get('f')
                 if isinstance(f_list, list) and f_list:
                     first_element = f_list[0]
                     if isinstance(first_element, dict):
-                        file_handle = first_element.get('h')
+                        node_dict = first_element
+                        file_handle = node_dict.get('h')
 
             except (IndexError, TypeError, AttributeError) as e_access:
                  logger.error(f"Erreur lors de l'accès à la structure imbriquée retournée par m.upload(): {e_access}", exc_info=True)
                  logger.error(f"Structure complète reçue: {uploaded_file_node_response}")
 
-            # ---> Vérification et Export (avec délai) <---
-            if file_handle:
-                logger.info(f"Handle du fichier trouvé: {file_handle}.")
+            # ---> Vérification et Export en passant le tuple (handle, node_data) via l'argument 'node' <---
+            if file_handle and node_dict:
+                logger.info(f"Handle du fichier trouvé: {file_handle}. Données du node extraites.")
 
-                # 5. Obtenir le lien public via m.export() (avec délai)
+                # 5. Obtenir le lien public via m.export(node=...)
                 try:
-                    # *** AJOUT D'UN DÉLAI POUR LA SYNCHRONISATION ***
-                    sleep_duration = 2 # Secondes (ajuster si besoin)
-                    logger.info(f"Ajout d'un délai de {sleep_duration} seconde(s) avant l'export...")
-                    time.sleep(sleep_duration)
-                    # *** FIN DÉLAI ***
+                    # *** Construction du tuple attendu par export en interne ***
+                    node_tuple_for_export = (file_handle, node_dict)
+                    logger.info(f"Construction du tuple (handle, node_data) pour l'argument 'node' de m.export...")
 
-                    logger.info(f"Appel de m.export() avec le handle: {file_handle}")
-                    public_link = m.export(file_handle) # Utilise le handle (string)
+                    # *** Appel de m.export en utilisant l'argument nommé 'node' ***
+                    public_link = m.export(node=node_tuple_for_export)
 
-                    # Vérifie si l'export a retourné un lien (il peut retourner None en cas d'échec interne)
                     if public_link:
-                        logger.info(f"Lien public Mega (via export) généré avec succès.")
+                        logger.info(f"Lien public Mega (via export avec node=tuple) généré avec succès.")
                         # 6. Retourner le lien
                         return jsonify({"url": public_link}), 200
                     else:
-                        logger.error(f"m.export() a retourné None pour le handle {file_handle} même après le délai.")
-                        return jsonify({"error": "Erreur interne: Impossible de générer le lien public (export a échoué)."}), 500
+                        # Si export retourne None même en passant le node tuple
+                        logger.error(f"m.export(node=tuple) a retourné None pour le handle {file_handle}.")
+                        return jsonify({"error": "Erreur interne: Impossible de générer le lien public (export node tuple a échoué)."}), 500
 
                 except Exception as export_error:
                     # Gère les erreurs spécifiques à l'exportation
-                    logger.error(f"Erreur lors de l'appel à m.export() pour le handle {file_handle}: {export_error}", exc_info=True)
+                    logger.error(f"Erreur lors de l'appel à m.export(node=tuple) pour le handle {file_handle}: {export_error}", exc_info=True)
                     error_message = f"Erreur interne lors de la création du lien public ({type(export_error).__name__}). Voir les logs serveur."
                     return jsonify({"error": error_message}), 500
 
             else:
-                # Si file_handle n'a pas pu être extrait
-                logger.error(f"Le handle ('h') n'a pas pu être extrait de la structure retournée par m.upload(). Structure: {uploaded_file_node_response}")
-                return jsonify({"error": "Erreur interne: Impossible d'extraire l'identifiant du fichier après upload (structure inattendue)."}), 500
+                # Si file_handle ou node_dict n'a pas pu être extrait
+                logger.error(f"Le handle ('h') ou les données du node n'ont pas pu être extraits de la structure retournée par m.upload(). Structure: {uploaded_file_node_response}")
+                return jsonify({"error": "Erreur interne: Impossible d'extraire les informations du fichier après upload (structure inattendue)."}), 500
 
         except Exception as e:
             logger.error(f"Erreur globale lors du traitement du fichier '{original_filename}': {e}", exc_info=True)
