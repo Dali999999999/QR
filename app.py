@@ -97,45 +97,42 @@ def upload_image():
             logger.info(f"Fichier '{temp_filename}' téléversé sur Mega.")
             logger.info(f"Structure retournée par m.upload: {uploaded_file_node_response}")
 
-            # ---> Accès au handle 'h' et au dictionnaire du node <---
+            # ---> Accès au handle 'h' <---
             file_handle = None
-            node_dict = None
             try:
                 f_list = uploaded_file_node_response.get('f')
                 if isinstance(f_list, list) and f_list:
                     first_element = f_list[0]
                     if isinstance(first_element, dict):
-                        node_dict = first_element
-                        file_handle = node_dict.get('h')
+                        file_handle = first_element.get('h')
 
             except (IndexError, TypeError, AttributeError) as e_access:
                  logger.error(f"Erreur lors de l'accès à la structure imbriquée retournée par m.upload(): {e_access}", exc_info=True)
                  logger.error(f"Structure complète reçue: {uploaded_file_node_response}")
 
-            # ---> Vérification et Export (avec refresh) <---
-            if file_handle: # On a juste besoin du handle pour l'export maintenant
+            # ---> Vérification et Obtention du lien via get_link() <---
+            if file_handle:
                 logger.info(f"Handle du fichier trouvé: {file_handle}.")
 
-                # 5. Obtenir le lien public
+                # 5. Obtenir le lien public via m.get_link()
                 try:
-                    # *** AJOUT : Force refresh de l'état interne ***
-                    logger.info("Forçage de la mise à jour de la liste des fichiers (appel à m.get_files())...")
-                    m.get_files()
-                    logger.info("Mise à jour de la liste des fichiers terminée.")
-                    # *** FIN AJOUT ***
+                    logger.info(f"Appel de m.get_link() avec le handle: {file_handle}")
+                    # Note: get_link prend le handle (str) ou le node dict. Utilisons le handle.
+                    public_link = m.get_link(file_handle) # *** LIGNE MODIFIÉE ***
 
-                    logger.info(f"Appel de m.export() avec le handle: {file_handle}")
-                    public_link = m.export(file_handle) # *** Utilise le handle (string) ***
-                    logger.info(f"Lien public Mega généré avec succès.")
+                    if public_link: # Vérifie si get_link a retourné quelque chose
+                        logger.info(f"Lien public Mega (via get_link) généré avec succès.")
+                        # 6. Retourner le lien
+                        return jsonify({"url": public_link}), 200
+                    else:
+                        # Si get_link retourne None ou une chaîne vide (ce qui peut arriver si le fichier n'est pas 'public')
+                        logger.error(f"m.get_link() n'a pas retourné de lien valide pour le handle {file_handle}. Le fichier est-il partageable ?")
+                        return jsonify({"error": "Erreur interne: Impossible de générer le lien public (get_link a échoué ou fichier non partageable)."}), 500
 
-                    # 6. Retourner le lien
-                    return jsonify({"url": public_link}), 200
-
-                except Exception as export_error:
-                    # Gère les erreurs spécifiques à l'exportation
-                    logger.error(f"Erreur lors de l'exportation du lien Mega pour le handle {file_handle}: {export_error}", exc_info=True)
-                    # Ajoute une information plus spécifique dans le message d'erreur si possible
-                    error_message = f"Erreur interne lors de la création du lien public ({type(export_error).__name__}). Voir les logs serveur."
+                except Exception as link_error:
+                    # Gère les erreurs spécifiques à la génération du lien
+                    logger.error(f"Erreur lors de l'appel à m.get_link() pour le handle {file_handle}: {link_error}", exc_info=True)
+                    error_message = f"Erreur interne lors de la création du lien public ({type(link_error).__name__}). Voir les logs serveur."
                     return jsonify({"error": error_message}), 500
 
             else:
