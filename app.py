@@ -93,46 +93,55 @@ def upload_image():
 
             # 4. Téléversement sur Mega
             logger.info(f"Téléversement du fichier '{temp_filename}' ({os.path.getsize(temp_filepath)} bytes) sur Mega...")
-            uploaded_file_node_response = m.upload(temp_filepath) # Renommé pour clarté
+            uploaded_file_node_response = m.upload(temp_filepath)
             logger.info(f"Fichier '{temp_filename}' téléversé sur Mega.")
             logger.info(f"Structure retournée par m.upload: {uploaded_file_node_response}")
 
             # ---> Accès au handle 'h' et au dictionnaire du node <---
             file_handle = None
-            node_dict = None # Pour stocker le dictionnaire {'h': ..., 't': ...}
+            node_dict = None
             try:
                 f_list = uploaded_file_node_response.get('f')
                 if isinstance(f_list, list) and f_list:
                     first_element = f_list[0]
                     if isinstance(first_element, dict):
-                        node_dict = first_element # Stocke le dictionnaire complet
-                        file_handle = node_dict.get('h') # Extrait le handle depuis le dict
+                        node_dict = first_element
+                        file_handle = node_dict.get('h')
 
             except (IndexError, TypeError, AttributeError) as e_access:
                  logger.error(f"Erreur lors de l'accès à la structure imbriquée retournée par m.upload(): {e_access}", exc_info=True)
                  logger.error(f"Structure complète reçue: {uploaded_file_node_response}")
-                 # Assure que file_handle et node_dict restent None
 
-            # ---> Vérification et Export <---
-            if file_handle and node_dict: # Vérifie qu'on a bien les deux
-                logger.info(f"Handle du fichier trouvé: {file_handle}. Données du node extraites.")
+            # ---> Vérification et Export (avec refresh) <---
+            if file_handle: # On a juste besoin du handle pour l'export maintenant
+                logger.info(f"Handle du fichier trouvé: {file_handle}.")
 
-                # 5. Obtenir le lien public en passant le dictionnaire du node
+                # 5. Obtenir le lien public
                 try:
-                    logger.info(f"Passage des données du node à m.export: {node_dict}")
-                    public_link = m.export(node_dict) # *** LIGNE MODIFIÉE ***
+                    # *** AJOUT : Force refresh de l'état interne ***
+                    logger.info("Forçage de la mise à jour de la liste des fichiers (appel à m.get_files())...")
+                    m.get_files()
+                    logger.info("Mise à jour de la liste des fichiers terminée.")
+                    # *** FIN AJOUT ***
+
+                    logger.info(f"Appel de m.export() avec le handle: {file_handle}")
+                    public_link = m.export(file_handle) # *** Utilise le handle (string) ***
                     logger.info(f"Lien public Mega généré avec succès.")
+
                     # 6. Retourner le lien
                     return jsonify({"url": public_link}), 200
 
                 except Exception as export_error:
-                    logger.error(f"Erreur lors de l'exportation du lien Mega pour le node {node_dict}: {export_error}", exc_info=True)
-                    return jsonify({"error": f"Erreur interne lors de la création du lien public: {export_error}"}), 500
+                    # Gère les erreurs spécifiques à l'exportation
+                    logger.error(f"Erreur lors de l'exportation du lien Mega pour le handle {file_handle}: {export_error}", exc_info=True)
+                    # Ajoute une information plus spécifique dans le message d'erreur si possible
+                    error_message = f"Erreur interne lors de la création du lien public ({type(export_error).__name__}). Voir les logs serveur."
+                    return jsonify({"error": error_message}), 500
 
             else:
-                # Si file_handle ou node_dict n'a pas pu être extrait
-                logger.error(f"Le handle ('h') ou les données du node n'ont pas pu être extraits de la structure retournée par m.upload(). Structure: {uploaded_file_node_response}")
-                return jsonify({"error": "Erreur interne: Impossible d'extraire les informations du fichier après upload (structure inattendue)."}), 500
+                # Si file_handle n'a pas pu être extrait
+                logger.error(f"Le handle ('h') n'a pas pu être extrait de la structure retournée par m.upload(). Structure: {uploaded_file_node_response}")
+                return jsonify({"error": "Erreur interne: Impossible d'extraire l'identifiant du fichier après upload (structure inattendue)."}), 500
 
         except Exception as e:
             logger.error(f"Erreur globale lors du traitement du fichier '{original_filename}': {e}", exc_info=True)
