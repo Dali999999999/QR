@@ -3,30 +3,31 @@ import logging
 from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from mega import Mega
-from mega.errors import ValidationError
+from mega.errors import RequestError, ValidationError # Ajout de RequestError
 import uuid
-import time # Nécessaire pour le délai
+# import time # Plus nécessaire car on enlève le délai explicite
 
 # Configuration du logging améliorée
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler()
+        logging.StreamHandler() # Afficher les logs dans la console/Render
     ]
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # Utiliser le logger nommé 'app'
 
 app = Flask(__name__)
 
 # --- Configuration et Constantes ---
 MEGA_EMAIL = os.environ.get('MEGA_EMAIL')
 MEGA_PASSWORD = os.environ.get('MEGA_PASSWORD')
-UPLOAD_FOLDER = '/tmp'
+UPLOAD_FOLDER = '/tmp' # Dossier temporaire standard sur les systèmes type Unix (comme Render)
 
 # --- Vérifications Initiales ---
 if not MEGA_EMAIL or not MEGA_PASSWORD:
     logger.critical("ERREUR CRITIQUE: Les variables d'environnement MEGA_EMAIL et MEGA_PASSWORD doivent être définies.")
+    # Dans un cas réel, on pourrait vouloir arrêter l'application ici
 
 if not os.path.exists(UPLOAD_FOLDER):
      try:
@@ -34,6 +35,7 @@ if not os.path.exists(UPLOAD_FOLDER):
          logger.info(f"Dossier temporaire créé: {UPLOAD_FOLDER}")
      except OSError as e:
          logger.error(f"Impossible de créer le dossier temporaire {UPLOAD_FOLDER}: {e}")
+         # Gérer l'erreur si nécessaire
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
@@ -44,13 +46,16 @@ def get_mega_instance():
         logger.error("Tentative de connexion à Mega échouée : Identifiants non configurés.")
         return None
     try:
-        logger.info(f"Tentative de connexion à Mega avec l'email : {MEGA_EMAIL[:4]}...")
+        logger.info(f"Tentative de connexion à Mega avec l'email : {MEGA_EMAIL[:4]}...") # Ne pas logger l'email complet
         mega = Mega()
         m = mega.login(MEGA_EMAIL, MEGA_PASSWORD)
         logger.info("Connexion à Mega réussie.")
         return m
+    except RequestError as req_err:
+        logger.error(f"Échec de la connexion à Mega (RequestError {req_err.code}): {req_err}")
+        return None
     except Exception as e:
-        logger.error(f"Échec de la connexion à Mega: {e}", exc_info=True)
+        logger.error(f"Échec de la connexion à Mega (Erreur générale): {e}", exc_info=True) # exc_info pour la stack trace complète
         return None
 
 # --- Routes Flask ---
@@ -78,6 +83,7 @@ def upload_image():
     if file:
         # 2. Sauvegarde temporaire sécurisée
         original_filename = secure_filename(file.filename)
+        # Générer un nom de fichier unique pour éviter les collisions dans /tmp
         temp_filename = f"{uuid.uuid4()}_{original_filename}"
         temp_filepath = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
 
@@ -85,83 +91,86 @@ def upload_image():
 
         try:
             file.save(temp_filepath)
-            logger.info(f"Fichier sauvegardé temporairement: '{temp_filepath}'")
+            file_size = os.path.getsize(temp_filepath) # Taille après sauvegarde
+            logger.info(f"Fichier sauvegardé temporairement: '{temp_filepath}' (Taille: {file_size} bytes)")
 
             # 3. Connexion à Mega
             m = get_mega_instance()
             if m is None:
                  logger.error("Échec de l'obtention de l'instance Mega pour l'upload.")
-                 return jsonify({"error": "Échec de la connexion au service de stockage"}), 503
+                 # Nettoyer le fichier temporaire avant de retourner l'erreur
+                 if os.path.exists(temp_filepath):
+                     try:
+                         os.remove(temp_filepath)
+                         logger.info(f"Fichier temporaire '{temp_filepath}' supprimé après échec de connexion Mega.")
+                     except OSError as e_remove:
+                         logger.error(f"Erreur lors de la suppression du fichier temp après échec Mega: {e_remove}")
+                 return jsonify({"error": "Échec de la connexion au service de stockage"}), 503 # Service Unavailable
 
             # 4. Téléversement sur Mega
-            logger.info(f"Téléversement du fichier '{temp_filename}' ({os.path.getsize(temp_filepath)} bytes) sur Mega...")
+            logger.info(f"Téléversement du fichier '{temp_filename}' ({file_size} bytes) sur Mega...")
             uploaded_file_node_response = m.upload(temp_filepath)
             logger.info(f"Fichier '{temp_filename}' téléversé sur Mega.")
-            logger.info(f"Structure retournée par m.upload: {uploaded_file_node_response}")
+            logger.info(f"Structure retournée par m.upload: {uploaded_file_node_response}") # Utile pour le débogage
 
-            # ---> Accès au handle 'h' <---
-            file_handle = None
+            # ====> DÉBUT DE LA SECTION CORRIGÉE <====
+
+            # 5. Obtenir le lien public DIRECTEMENT depuis la réponse de l'upload
+            #    Pas besoin de refaire un find() qui peut échouer à cause de la latence.
+            public_link = None
             try:
-                f_list = uploaded_file_node_response.get('f')
-                if isinstance(f_list, list) and f_list:
-                    first_element = f_list[0]
-                    if isinstance(first_element, dict):
-                        file_handle = first_element.get('h') # Extrait le handle
+                # La fonction get_upload_link est conçue pour ça !
+                # Elle prend en argument la réponse de m.upload()
+                logger.info("Tentative de génération du lien via m.get_upload_link()...")
+                public_link = m.get_upload_link(uploaded_file_node_response)
+                logger.info(f"Lien public Mega généré (via get_upload_link): {public_link}")
 
-            except (IndexError, TypeError, AttributeError) as e_access:
-                 logger.error(f"Erreur lors de l'accès à la structure imbriquée retournée par m.upload(): {e_access}", exc_info=True)
-                 logger.error(f"Structure complète reçue: {uploaded_file_node_response}")
-
-            # ---> Vérification et Export via find() après délai <---
-            if file_handle:
-                logger.info(f"Handle du fichier trouvé: {file_handle}.")
-
-                # 5. Tentative de retrouver le node via m.find() après un délai, puis export
+            except Exception as e_get_link:
+                logger.error(f"Erreur lors de la génération du lien public avec get_upload_link: {e_get_link}", exc_info=True)
+                # Tentative de fallback avec m.export() si get_upload_link échoue
+                logger.warning("get_upload_link a échoué. Tentative de fallback avec m.export()...")
                 try:
-                    # *** AJOUT D'UN DÉLAI POUR LA SYNCHRONISATION ***
-                    sleep_duration = 10 # Augmenté à 3 secondes
-                    logger.info(f"Ajout d'un délai de {sleep_duration} seconde(s) avant la recherche et l'export...")
-                    time.sleep(sleep_duration)
+                    # Essayer d'extraire le handle 'h' de la réponse pour m.export()
+                    file_handle = None
+                    f_list = uploaded_file_node_response.get('f')
+                    if isinstance(f_list, list) and f_list:
+                        first_element = f_list[0]
+                        if isinstance(first_element, dict):
+                            file_handle = first_element.get('h')
 
-                    # *** Recherche explicite du node via m.find() ***
-                    logger.info(f"Recherche explicite du node avec m.find('{file_handle}')...")
-                    found_node_object = m.find(file_handle) # Trouve le node object (tuple)
-                    logger.info(f"Résultat de m.find: {found_node_object}") # Log important
-
-                    if found_node_object:
-                        logger.info(f"Node trouvé avec succès via m.find(). Appel de m.export() avec cet objet node...")
-                        # *** Appel de m.export() avec l'objet node trouvé ***
-                        public_link = m.export(found_node_object) # Passe l'objet node trouvé
-
-                        if public_link:
-                            logger.info(f"Lien public Mega (via find + export) généré avec succès.")
-                            # 6. Retourner le lien
-                            return jsonify({"url": public_link}), 200
-                        else:
-                            logger.error(f"m.export(found_node_object) a retourné None pour le handle {file_handle}.")
-                            return jsonify({"error": "Erreur interne: Impossible de générer le lien public (export après find a échoué)."}), 500
+                    if file_handle:
+                         logger.info(f"Handle '{file_handle}' trouvé pour le fallback m.export().")
+                         public_link = m.export(file_handle) # m.export nécessite juste le handle
+                         logger.info(f"Lien public Mega généré (via m.export fallback): {public_link}")
                     else:
-                        # Si m.find() retourne None même après le délai
-                        logger.error(f"m.find('{file_handle}') a retourné None même après le délai. Impossible d'exporter.")
-                        return jsonify({"error": "Erreur interne: Impossible de retrouver le fichier après upload pour générer le lien."}), 500
+                         logger.error("Handle non trouvé dans la réponse d'upload pour le fallback m.export(). Impossible de continuer.")
+                         raise ValueError("Handle non trouvé pour le fallback export.") # Lève une erreur pour le except externe
 
-                except Exception as export_error:
-                    # Gère les erreurs spécifiques à find ou export
-                    logger.error(f"Erreur lors de find/export pour le handle {file_handle}: {export_error}", exc_info=True)
-                    error_message = f"Erreur interne lors de la création du lien public ({type(export_error).__name__}). Voir les logs serveur."
-                    return jsonify({"error": error_message}), 500
+                except Exception as inner_e:
+                     # Si le fallback échoue aussi
+                     logger.error(f"Le fallback m.export a aussi échoué: {inner_e}", exc_info=True)
+                     # On renvoie l'erreur initiale de get_upload_link ou du fallback si elle est plus pertinente
+                     error_message = f"Erreur interne lors de la génération du lien post-upload ({type(e_get_link).__name__} / {type(inner_e).__name__})."
+                     return jsonify({"error": error_message}), 500
 
+            # 6. Retourner le lien à l'application Flutter / au script de test si obtenu
+            if public_link:
+                 return jsonify({"url": public_link}), 200
             else:
-                # Si file_handle n'a pas pu être extrait
-                logger.error(f"Le handle ('h') n'a pas pu être extrait de la structure retournée par m.upload(). Structure: {uploaded_file_node_response}")
-                return jsonify({"error": "Erreur interne: Impossible d'extraire l'identifiant du fichier après upload (structure inattendue)."}), 500
+                 # Ce cas ne devrait pas arriver si les try/except ci-dessus sont corrects, mais par sécurité
+                 logger.error("Le lien public est resté None après toutes les tentatives. Erreur inattendue.")
+                 return jsonify({"error": "Erreur interne inattendue lors de la finalisation du lien public."}), 500
+
+            # ====> FIN DE LA SECTION CORRIGÉE <====
 
         except Exception as e:
-            logger.error(f"Erreur globale lors du traitement du fichier '{original_filename}': {e}", exc_info=True)
-            return jsonify({"error": "Erreur interne du serveur lors du traitement du fichier."}), 500
+            # Capture les erreurs majeures pendant le processus (sauvegarde, upload, etc.)
+            logger.error(f"Erreur majeure lors du traitement du fichier '{original_filename}': {e}", exc_info=True)
+            return jsonify({"error": f"Erreur interne majeure du serveur ({type(e).__name__})."}), 500
 
         finally:
-            # 7. Nettoyage
+            # 7. Nettoyage du fichier temporaire (TRES IMPORTANT)
+            # Ce bloc s'exécute TOUJOURS, que le try réussisse ou échoue.
             if os.path.exists(temp_filepath):
                 try:
                     os.remove(temp_filepath)
@@ -169,8 +178,22 @@ def upload_image():
                 except OSError as e_remove:
                     logger.error(f"Erreur lors de la suppression du fichier temporaire '{temp_filepath}': {e_remove}")
     else:
+        # Ce cas ne devrait théoriquement pas arriver si les vérifs initiales sont bonnes
         logger.warning("Logique inattendue : 'file' est évalué comme False après vérifications initiales.")
         return jsonify({"error": "Fichier invalide ou non traité"}), 400
 
 # --- Démarrage (pour Gunicorn sur Render) ---
-# (Bloc de test local inchangé et commenté)
+# Le serveur WSGI (comme Gunicorn) importe 'app' et l'exécute.
+# Le bloc if __name__ == '__main__': n'est PAS utilisé par Gunicorn.
+# Laisser ce bloc pour les tests locaux si nécessaire.
+
+# if __name__ == '__main__':
+#    # ATTENTION : Ne pas utiliser debug=True en production !
+#    # Pour tester localement, définir les variables d'environnement :
+#    # export MEGA_EMAIL='ton_email@example.com'
+#    # export MEGA_PASSWORD='ton_mot_de_passe'
+#    # python app.py
+#    # Render définit la variable PORT automatiquement.
+#    port = int(os.environ.get('PORT', 8080)) # Utilise 8080 par défaut localement
+#    # Écoute sur 0.0.0.0 pour être accessible depuis l'extérieur du conteneur/VM
+#    app.run(host='0.0.0.0', port=port, debug=False)
