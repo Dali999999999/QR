@@ -4,6 +4,7 @@ from flask import Flask, request, jsonify
 from werkzeug.utils import secure_filename
 from mega import Mega
 import uuid # Pour générer des noms de fichiers temporaires uniques
+import time # <-- Import nécessaire pour le délai
 
 # Configuration du logging améliorée
 logging.basicConfig(
@@ -110,29 +111,34 @@ def upload_image():
                  logger.error(f"Erreur lors de l'accès à la structure imbriquée retournée par m.upload(): {e_access}", exc_info=True)
                  logger.error(f"Structure complète reçue: {uploaded_file_node_response}")
 
-            # ---> Vérification et Obtention du lien via get_link() <---
+            # ---> Vérification et Export (avec délai) <---
             if file_handle:
                 logger.info(f"Handle du fichier trouvé: {file_handle}.")
 
-                # 5. Obtenir le lien public via m.get_link()
+                # 5. Obtenir le lien public via m.export() (avec délai)
                 try:
-                    logger.info(f"Appel de m.get_link() avec le handle: {file_handle}")
-                    # Note: get_link prend le handle (str) ou le node dict. Utilisons le handle.
-                    public_link = m.get_link(file_handle) # *** LIGNE MODIFIÉE ***
+                    # *** AJOUT D'UN DÉLAI POUR LA SYNCHRONISATION ***
+                    sleep_duration = 2 # Secondes (ajuster si besoin)
+                    logger.info(f"Ajout d'un délai de {sleep_duration} seconde(s) avant l'export...")
+                    time.sleep(sleep_duration)
+                    # *** FIN DÉLAI ***
 
-                    if public_link: # Vérifie si get_link a retourné quelque chose
-                        logger.info(f"Lien public Mega (via get_link) généré avec succès.")
+                    logger.info(f"Appel de m.export() avec le handle: {file_handle}")
+                    public_link = m.export(file_handle) # Utilise le handle (string)
+
+                    # Vérifie si l'export a retourné un lien (il peut retourner None en cas d'échec interne)
+                    if public_link:
+                        logger.info(f"Lien public Mega (via export) généré avec succès.")
                         # 6. Retourner le lien
                         return jsonify({"url": public_link}), 200
                     else:
-                        # Si get_link retourne None ou une chaîne vide (ce qui peut arriver si le fichier n'est pas 'public')
-                        logger.error(f"m.get_link() n'a pas retourné de lien valide pour le handle {file_handle}. Le fichier est-il partageable ?")
-                        return jsonify({"error": "Erreur interne: Impossible de générer le lien public (get_link a échoué ou fichier non partageable)."}), 500
+                        logger.error(f"m.export() a retourné None pour le handle {file_handle} même après le délai.")
+                        return jsonify({"error": "Erreur interne: Impossible de générer le lien public (export a échoué)."}), 500
 
-                except Exception as link_error:
-                    # Gère les erreurs spécifiques à la génération du lien
-                    logger.error(f"Erreur lors de l'appel à m.get_link() pour le handle {file_handle}: {link_error}", exc_info=True)
-                    error_message = f"Erreur interne lors de la création du lien public ({type(link_error).__name__}). Voir les logs serveur."
+                except Exception as export_error:
+                    # Gère les erreurs spécifiques à l'exportation
+                    logger.error(f"Erreur lors de l'appel à m.export() pour le handle {file_handle}: {export_error}", exc_info=True)
+                    error_message = f"Erreur interne lors de la création du lien public ({type(export_error).__name__}). Voir les logs serveur."
                     return jsonify({"error": error_message}), 500
 
             else:
