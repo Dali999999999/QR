@@ -1,0 +1,5 @@
+Flask>=2.0.0     # Le framework web
+mega.py>=1.0.9   # La librairie pour interagir avec Mega.nz
+gunicorn>=20.0.0 # Le serveur WSGI pour la production (requis par Render)
+Werkzeug>=2.0.0  # Dépendance de Flask, bon à spécifier
+requests>=2.25.0 # Dépendance de mega.py, parfois utile de spécifier
