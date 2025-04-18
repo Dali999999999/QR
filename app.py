@@ -1,11 +1,12 @@
 import os
 import logging
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file, make_response
 from werkzeug.utils import secure_filename
 from mega import Mega
-from mega.errors import RequestError, ValidationError # Ajout de RequestError
+from mega.errors import RequestError, ValidationError
 import uuid
-# import time # Plus nécessaire car on enlève le délai explicite
+import io  # Pour manipuler les données en mémoire si nécessaire (non utilisé ici pour le dl)
+import mimetypes # Pour deviner le type de fichier
 
 # Configuration du logging améliorée
 logging.basicConfig(
@@ -27,7 +28,6 @@ UPLOAD_FOLDER = '/tmp' # Dossier temporaire standard sur les systèmes type Unix
 # --- Vérifications Initiales ---
 if not MEGA_EMAIL or not MEGA_PASSWORD:
     logger.critical("ERREUR CRITIQUE: Les variables d'environnement MEGA_EMAIL et MEGA_PASSWORD doivent être définies.")
-    # Dans un cas réel, on pourrait vouloir arrêter l'application ici
 
 if not os.path.exists(UPLOAD_FOLDER):
      try:
@@ -35,165 +35,223 @@ if not os.path.exists(UPLOAD_FOLDER):
          logger.info(f"Dossier temporaire créé: {UPLOAD_FOLDER}")
      except OSError as e:
          logger.error(f"Impossible de créer le dossier temporaire {UPLOAD_FOLDER}: {e}")
-         # Gérer l'erreur si nécessaire
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # --- Fonctions Utilitaires ---
 def get_mega_instance():
-    """Initialise et retourne une instance Mega connectée."""
+    """Initialise et retourne une instance Mega connectée AVEC COMPTE."""
+    # Utilisé pour l'upload
     if not MEGA_EMAIL or not MEGA_PASSWORD:
-        logger.error("Tentative de connexion à Mega échouée : Identifiants non configurés.")
+        logger.error("Tentative de connexion à Mega (compte) échouée : Identifiants non configurés.")
         return None
     try:
-        logger.info(f"Tentative de connexion à Mega avec l'email : {MEGA_EMAIL[:4]}...") # Ne pas logger l'email complet
+        logger.info(f"Tentative de connexion à Mega (compte) avec l'email : {MEGA_EMAIL[:4]}...")
         mega = Mega()
         m = mega.login(MEGA_EMAIL, MEGA_PASSWORD)
-        logger.info("Connexion à Mega réussie.")
+        logger.info("Connexion à Mega (compte) réussie.")
         return m
     except RequestError as req_err:
-        logger.error(f"Échec de la connexion à Mega (RequestError {req_err.code}): {req_err}")
+        logger.error(f"Échec de la connexion à Mega (compte - RequestError {req_err.code}): {req_err}")
         return None
     except Exception as e:
-        logger.error(f"Échec de la connexion à Mega (Erreur générale): {e}", exc_info=True) # exc_info pour la stack trace complète
+        logger.error(f"Échec de la connexion à Mega (compte - Erreur générale): {e}", exc_info=True)
         return None
 
 # --- Routes Flask ---
 @app.route('/')
 def index():
     """Route de base pour vérifier si le service est opérationnel."""
-    return jsonify({"message": "Le backend de génération de QR Code Image est opérationnel!"})
+    return jsonify({"message": "Le backend QR Code Image (avec proxy Mega) est opérationnel!"})
 
+# --- ROUTE /upload (INCHANGÉE DANS SA LOGIQUE DE BASE) ---
+# Elle reçoit une image, l'upload et retourne le lien public Mega
 @app.route('/upload', methods=['POST'])
 def upload_image():
-    """Route pour recevoir une image, l'uploader sur Mega et retourner le lien."""
+    """
+    Reçoit une image, l'upload sur le compte Mega de l'admin
+    et retourne le LIEN PUBLIC Mega.
+    """
     logger.info("Requête reçue sur /upload")
+    # ... (Le reste de la logique de validation et d'upload est identique à la version précédente) ...
+    # ... (Vérification 'file', sauvegarde temporaire, get_mega_instance(), m.upload()) ...
 
-    # 1. Vérification de la requête
+    # --- Partie spécifique à upload ---
     if 'file' not in request.files:
-        logger.warning("Aucun fichier trouvé dans la requête (clé 'file' manquante).")
-        return jsonify({"error": "Aucun fichier fourni (champ 'file' manquant)"}), 400
-
+        logger.warning("Upload: Aucun fichier trouvé.")
+        return jsonify({"error": "Aucun fichier fourni"}), 400
     file = request.files['file']
-
     if file.filename == '':
-        logger.warning("Nom de fichier vide reçu.")
+        logger.warning("Upload: Nom de fichier vide.")
         return jsonify({"error": "Nom de fichier vide"}), 400
 
     if file:
-        # 2. Sauvegarde temporaire sécurisée
         original_filename = secure_filename(file.filename)
-        # Générer un nom de fichier unique pour éviter les collisions dans /tmp
-        temp_filename = f"{uuid.uuid4()}_{original_filename}"
-        temp_filepath = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename)
-
-        logger.info(f"Réception du fichier: '{original_filename}'. Sauvegarde temporaire sous: '{temp_filepath}'")
+        temp_filename_upload = f"{uuid.uuid4()}_UPLOAD_{original_filename}"
+        temp_filepath_upload = os.path.join(app.config['UPLOAD_FOLDER'], temp_filename_upload)
+        logger.info(f"Upload: Sauvegarde temporaire sous: '{temp_filepath_upload}'")
 
         try:
-            file.save(temp_filepath)
-            file_size = os.path.getsize(temp_filepath) # Taille après sauvegarde
-            logger.info(f"Fichier sauvegardé temporairement: '{temp_filepath}' (Taille: {file_size} bytes)")
+            file.save(temp_filepath_upload)
+            file_size = os.path.getsize(temp_filepath_upload)
+            logger.info(f"Upload: Fichier sauvegardé: '{temp_filepath_upload}' ({file_size} bytes)")
 
-            # 3. Connexion à Mega
+            # Connexion avec le compte principal
             m = get_mega_instance()
             if m is None:
-                 logger.error("Échec de l'obtention de l'instance Mega pour l'upload.")
-                 # Nettoyer le fichier temporaire avant de retourner l'erreur
-                 if os.path.exists(temp_filepath):
-                     try:
-                         os.remove(temp_filepath)
-                         logger.info(f"Fichier temporaire '{temp_filepath}' supprimé après échec de connexion Mega.")
-                     except OSError as e_remove:
-                         logger.error(f"Erreur lors de la suppression du fichier temp après échec Mega: {e_remove}")
-                 return jsonify({"error": "Échec de la connexion au service de stockage"}), 503 # Service Unavailable
+                 logger.error("Upload: Échec connexion Mega.")
+                 return jsonify({"error": "Échec connexion service stockage"}), 503
 
-            # 4. Téléversement sur Mega
-            logger.info(f"Téléversement du fichier '{temp_filename}' ({file_size} bytes) sur Mega...")
-            uploaded_file_node_response = m.upload(temp_filepath)
-            logger.info(f"Fichier '{temp_filename}' téléversé sur Mega.")
-            logger.info(f"Structure retournée par m.upload: {uploaded_file_node_response}") # Utile pour le débogage
+            logger.info(f"Upload: Téléversement '{temp_filename_upload}' sur Mega...")
+            uploaded_file_node_response = m.upload(temp_filepath_upload)
+            logger.info(f"Upload: Téléversement terminé.")
+            logger.debug(f"Upload: Réponse m.upload: {uploaded_file_node_response}") # Debug au lieu d'info
 
-            # ====> DÉBUT DE LA SECTION CORRIGÉE <====
-
-            # 5. Obtenir le lien public DIRECTEMENT depuis la réponse de l'upload
-            #    Pas besoin de refaire un find() qui peut échouer à cause de la latence.
+            # Génération du lien public
             public_link = None
             try:
-                # La fonction get_upload_link est conçue pour ça !
-                # Elle prend en argument la réponse de m.upload()
-                logger.info("Tentative de génération du lien via m.get_upload_link()...")
+                logger.info("Upload: Génération lien via m.get_upload_link()...")
                 public_link = m.get_upload_link(uploaded_file_node_response)
-                logger.info(f"Lien public Mega généré (via get_upload_link): {public_link}")
-
+                logger.info(f"Upload: Lien public généré: {public_link}")
             except Exception as e_get_link:
-                logger.error(f"Erreur lors de la génération du lien public avec get_upload_link: {e_get_link}", exc_info=True)
-                # Tentative de fallback avec m.export() si get_upload_link échoue
-                logger.warning("get_upload_link a échoué. Tentative de fallback avec m.export()...")
+                logger.error(f"Upload: Erreur get_upload_link: {e_get_link}", exc_info=True)
+                # Fallback avec m.export()
+                logger.warning("Upload: Fallback avec m.export()...")
                 try:
-                    # Essayer d'extraire le handle 'h' de la réponse pour m.export()
-                    file_handle = None
-                    f_list = uploaded_file_node_response.get('f')
-                    if isinstance(f_list, list) and f_list:
-                        first_element = f_list[0]
-                        if isinstance(first_element, dict):
-                            file_handle = first_element.get('h')
-
+                    file_handle = uploaded_file_node_response.get('f', [{}])[0].get('h')
                     if file_handle:
-                         logger.info(f"Handle '{file_handle}' trouvé pour le fallback m.export().")
-                         public_link = m.export(file_handle) # m.export nécessite juste le handle
-                         logger.info(f"Lien public Mega généré (via m.export fallback): {public_link}")
-                    else:
-                         logger.error("Handle non trouvé dans la réponse d'upload pour le fallback m.export(). Impossible de continuer.")
-                         raise ValueError("Handle non trouvé pour le fallback export.") # Lève une erreur pour le except externe
-
+                         public_link = m.export(file_handle)
+                         logger.info(f"Upload: Lien public généré (fallback): {public_link}")
+                    else: raise ValueError("Handle non trouvé pour fallback.")
                 except Exception as inner_e:
-                     # Si le fallback échoue aussi
-                     logger.error(f"Le fallback m.export a aussi échoué: {inner_e}", exc_info=True)
-                     # On renvoie l'erreur initiale de get_upload_link ou du fallback si elle est plus pertinente
-                     error_message = f"Erreur interne lors de la génération du lien post-upload ({type(e_get_link).__name__} / {type(inner_e).__name__})."
-                     return jsonify({"error": error_message}), 500
+                     logger.error(f"Upload: Fallback export échoué: {inner_e}", exc_info=True)
+                     return jsonify({"error": "Erreur interne génération lien post-upload"}), 500
 
-            # 6. Retourner le lien à l'application Flutter / au script de test si obtenu
             if public_link:
+                 # C'est CE lien public qui sera dans le QR code
                  return jsonify({"url": public_link}), 200
             else:
-                 # Ce cas ne devrait pas arriver si les try/except ci-dessus sont corrects, mais par sécurité
-                 logger.error("Le lien public est resté None après toutes les tentatives. Erreur inattendue.")
-                 return jsonify({"error": "Erreur interne inattendue lors de la finalisation du lien public."}), 500
-
-            # ====> FIN DE LA SECTION CORRIGÉE <====
+                 logger.error("Upload: Lien public final est None.")
+                 return jsonify({"error": "Erreur interne finalisation lien public."}), 500
 
         except Exception as e:
-            # Capture les erreurs majeures pendant le processus (sauvegarde, upload, etc.)
-            logger.error(f"Erreur majeure lors du traitement du fichier '{original_filename}': {e}", exc_info=True)
-            return jsonify({"error": f"Erreur interne majeure du serveur ({type(e).__name__})."}), 500
-
+            logger.error(f"Upload: Erreur majeure '{original_filename}': {e}", exc_info=True)
+            return jsonify({"error": f"Erreur interne serveur ({type(e).__name__})."}), 500
         finally:
-            # 7. Nettoyage du fichier temporaire (TRES IMPORTANT)
-            # Ce bloc s'exécute TOUJOURS, que le try réussisse ou échoue.
-            if os.path.exists(temp_filepath):
+            if os.path.exists(temp_filepath_upload):
                 try:
-                    os.remove(temp_filepath)
-                    logger.info(f"Fichier temporaire supprimé: '{temp_filepath}'")
+                    os.remove(temp_filepath_upload)
+                    logger.info(f"Upload: Fichier temporaire supprimé: '{temp_filepath_upload}'")
                 except OSError as e_remove:
-                    logger.error(f"Erreur lors de la suppression du fichier temporaire '{temp_filepath}': {e_remove}")
+                    logger.error(f"Upload: Erreur suppression temp: {e_remove}")
     else:
-        # Ce cas ne devrait théoriquement pas arriver si les vérifs initiales sont bonnes
-        logger.warning("Logique inattendue : 'file' est évalué comme False après vérifications initiales.")
         return jsonify({"error": "Fichier invalide ou non traité"}), 400
 
-# --- Démarrage (pour Gunicorn sur Render) ---
-# Le serveur WSGI (comme Gunicorn) importe 'app' et l'exécute.
-# Le bloc if __name__ == '__main__': n'est PAS utilisé par Gunicorn.
-# Laisser ce bloc pour les tests locaux si nécessaire.
 
+# --- NOUVELLE ROUTE : /get_image_from_mega_link ---
+@app.route('/get_image_from_mega_link', methods=['POST'])
+def get_image_from_mega_link():
+    """
+    Reçoit un lien public Mega, télécharge le fichier correspondant sur le serveur,
+    puis retourne les octets bruts de l'image déchiffrée.
+    """
+    logger.info("Requête reçue sur /get_image_from_mega_link")
+
+    # 1. Récupérer le lien depuis le corps JSON de la requête
+    data = request.get_json()
+    if not data:
+        logger.warning("DownloadProxy: Corps de requête vide ou non JSON.")
+        return jsonify({"error": "Corps de requête JSON manquant ou invalide"}), 400
+
+    mega_url = data.get('mega_url')
+    if not mega_url:
+        logger.warning("DownloadProxy: Clé 'mega_url' manquante dans JSON.")
+        return jsonify({"error": "Clé 'mega_url' manquante"}), 400
+
+    # 2. Valider basiquement le format de l'URL (optionnel mais recommandé)
+    if not mega_url.startswith("https://mega.nz/file/") or '!' not in mega_url:
+         logger.warning(f"DownloadProxy: Format URL Mega invalide reçu: {mega_url}")
+         return jsonify({"error": "Format de lien Mega invalide"}), 400
+
+    logger.info(f"DownloadProxy: Traitement du lien: {mega_url[:35]}...") # Log tronqué
+
+    # 3. Initialiser Mega (peut se faire anonymement pour télécharger un lien public)
+    try:
+        logger.info("DownloadProxy: Initialisation session Mega anonyme...")
+        # Note: Pas besoin de login compte admin ici, on télécharge un lien public
+        mega_downloader = Mega()
+        # Tenter un login anonyme pour établir une session, même si pas strictement nécessaire pour l'API 'g'
+        # m_anon = mega_downloader.login_anonymous() # Optionnel, download_url le gère peut-être
+        logger.info("DownloadProxy: Session Mega initialisée.")
+    except Exception as e_init:
+        logger.error(f"DownloadProxy: Erreur initialisation Mega anonyme: {e_init}", exc_info=True)
+        return jsonify({"error": "Erreur interne initialisation service"}), 500
+
+    # 4. Télécharger le fichier depuis le lien public SUR LE SERVEUR RENDER
+    temp_download_path = None # Garder une trace pour le cleanup
+    try:
+        logger.info(f"DownloadProxy: Tentative de téléchargement depuis l'URL Mega...")
+        # m.download_url() télécharge ET déchiffre le fichier dans le dossier spécifié.
+        # Il retourne le chemin complet du fichier téléchargé sur le serveur.
+        # Le nom de fichier sera celui stocké dans les métadonnées Mega.
+        downloaded_filepath = mega_downloader.download_url(
+            url=mega_url,
+            dest_path=app.config['UPLOAD_FOLDER']
+            # Possibilité d'ajouter dest_filename si on veut forcer un nom temporaire
+        )
+        temp_download_path = str(downloaded_filepath) # Conserve le chemin pour finally
+        logger.info(f"DownloadProxy: Fichier téléchargé et déchiffré sur le serveur : '{temp_download_path}'")
+
+        # 5. Envoyer les données du fichier téléchargé au client
+        if not os.path.exists(temp_download_path):
+             logger.error(f"DownloadProxy: Fichier téléchargé non trouvé sur disque à '{temp_download_path}' après download_url !")
+             return jsonify({"error": "Erreur interne: Fichier disparu après téléchargement"}), 500
+
+        # Déterminer le mimetype
+        mimetype, _ = mimetypes.guess_type(temp_download_path)
+        if not mimetype or not mimetype.startswith('image/'):
+            logger.warning(f"DownloadProxy: Impossible de déterminer un mimetype d'image valide pour '{temp_download_path}'. Mimetype deviné: {mimetype}. Utilisation de 'application/octet-stream'.")
+            mimetype = 'application/octet-stream' # Fallback générique
+
+        logger.info(f"DownloadProxy: Envoi du fichier '{os.path.basename(temp_download_path)}' avec mimetype '{mimetype}'...")
+
+        # Utiliser send_file pour streamer le fichier depuis le disque du serveur vers le client
+        response = make_response(send_file(
+            temp_download_path,
+            mimetype=mimetype,
+            as_attachment=False # Important pour que le client essaie de l'afficher
+        ))
+        # Optionnel: Ajouter des headers pour le cache si besoin
+        # response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        # response.headers['Pragma'] = 'no-cache'
+        # response.headers['Expires'] = '0'
+        return response
+
+    except RequestError as req_err:
+        logger.error(f"DownloadProxy: Erreur Mega API lors du téléchargement ({req_err.code}): {req_err}", exc_info=True)
+        status_code = 502 # Bad Gateway (erreur en amont)
+        error_msg = f"Erreur du service de stockage ({req_err.code})"
+        if req_err.code == -9: # Fichier non trouvé
+             status_code = 404
+             error_msg = "Fichier non trouvé sur le service de stockage (lien invalide ou expiré?)"
+        elif req_err.code == -2: # Argument invalide
+              status_code = 400
+              error_msg = "Format de lien Mega incorrect"
+        return jsonify({"error": error_msg, "details": str(req_err)}), status_code
+    except Exception as e:
+        logger.error(f"DownloadProxy: Erreur inattendue lors du téléchargement/envoi: {e}", exc_info=True)
+        return jsonify({"error": f"Erreur interne du serveur ({type(e).__name__})."}), 500
+    finally:
+        # 6. Nettoyer le fichier téléchargé sur le serveur (TRÈS IMPORTANT)
+        if temp_download_path and os.path.exists(temp_download_path):
+            try:
+                os.remove(temp_download_path)
+                logger.info(f"DownloadProxy: Fichier temporaire serveur supprimé: '{temp_download_path}'")
+            except OSError as e_remove:
+                logger.error(f"DownloadProxy: Erreur suppression temp serveur '{temp_download_path}': {e_remove}")
+
+# --- Démarrage (pour Gunicorn sur Render) ---
+# (Laisser commenté pour la production sur Render)
 # if __name__ == '__main__':
-#    # ATTENTION : Ne pas utiliser debug=True en production !
-#    # Pour tester localement, définir les variables d'environnement :
-#    # export MEGA_EMAIL='ton_email@example.com'
-#    # export MEGA_PASSWORD='ton_mot_de_passe'
-#    # python app.py
-#    # Render définit la variable PORT automatiquement.
-#    port = int(os.environ.get('PORT', 8080)) # Utilise 8080 par défaut localement
-#    # Écoute sur 0.0.0.0 pour être accessible depuis l'extérieur du conteneur/VM
+#    port = int(os.environ.get('PORT', 8080))
 #    app.run(host='0.0.0.0', port=port, debug=False)
