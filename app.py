@@ -169,7 +169,7 @@ def get_image_from_mega_link():
         return jsonify({"error": "Clé 'mega_url' manquante"}), 400
 
     # 2. Valider basiquement le format de l'URL (optionnel mais recommandé)
-    if not mega_url.startswith("https://mega.nz/file/") or '!' not in mega_url:
+    if not mega_url.startswith("https://mega.nz/") or '!' not in mega_url:
          logger.warning(f"DownloadProxy: Format URL Mega invalide reçu: {mega_url}")
          return jsonify({"error": "Format de lien Mega invalide"}), 400
 
