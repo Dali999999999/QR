@@ -171,7 +171,7 @@ def get_image_from_mega_link():
     # 2. Valider basiquement le format de l'URL (optionnel mais recommandé)
     if not mega_url.startswith("https://mega.") or '!' not in mega_url:
          logger.warning(f"DownloadProxy: Format URL Mega invalide reçu: {mega_url}")
-         return jsonify({"error": "Format de lien Mega invalide"}), 400
+         return jsonify({"error": "QR code invalide"}), 400
 
     logger.info(f"DownloadProxy: Traitement du lien: {mega_url[:35]}...") # Log tronqué
 
